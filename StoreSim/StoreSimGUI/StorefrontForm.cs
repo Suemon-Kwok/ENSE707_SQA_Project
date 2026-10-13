@@ -100,7 +100,7 @@ namespace StoreSimGUI
             };
             this.Controls.Add(txtQuantity);
 
-            // 4. Action Buttons
+            // Action Buttons
             btnAddToCart = new Button
             {
                 Text = "Add to Cart",

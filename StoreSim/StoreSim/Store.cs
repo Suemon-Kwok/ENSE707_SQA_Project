@@ -1,14 +1,15 @@
-﻿using System;
+﻿using Npgsql;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Text;
 using System.Threading;
-using Npgsql;
 
 namespace StoreSim
 {
     public class Store
     {
-        // Explicit toggles for failure states (Connection drop & Latency)
+        // Explicit toggles for failure states
         public static bool SimulateConnectionDrop { get; set; } = false;
         public static int SimulatedLatencyMs { get; set; } = 0;
 
@@ -18,7 +19,7 @@ namespace StoreSim
         {
             if (SimulateConnectionDrop)
             {
-                // Simulate connection failure throwing NpgsqlException
+                // conn fail sim
                 throw new NpgsqlException("Simulated database connection dropped.");
             }
 
@@ -56,13 +57,11 @@ namespace StoreSim
             }
             catch (NpgsqlException ex)
             {
-                // Intercept 100% of NpgsqlExceptions, capturing timestamp & error code without crashing GUI
                 LogErrorToAudit(ex);
                 return fallbackValue;
             }
             catch (Exception ex)
             {
-                // General safety catch to prevent unhandled WinForms crashes
                 System.Diagnostics.Debug.WriteLine($"[Unexpected Error] {DateTime.UtcNow}: {ex.Message}");
                 return fallbackValue;
             }
@@ -81,7 +80,7 @@ namespace StoreSim
             }
         }
 
-        // Reset pool connection health check & clearing
+        // Reset pool conn
         public void ResetConnectionPools()
         {
             SimulateConnectionDrop = false;
@@ -231,6 +230,22 @@ namespace StoreSim
                     throw;
                 }
             }, false);
+        }
+
+        public string GetStoreLogoAscii()
+        {
+            return ExecuteSafely(conn =>
+            {
+                string query = "SELECT image_data FROM binary_assets WHERE entity_id = 1 AND entity_type = 'StoreLogoASCII'";
+                using var cmd = new NpgsqlCommand(query, conn);
+                var result = cmd.ExecuteScalar();
+                if (result != null && result != DBNull.Value)
+                {
+                    byte[] bytes = (byte[])result;
+                    return Encoding.UTF8.GetString(bytes);
+                }
+                return string.Empty;
+            }, string.Empty);
         }
 
         public List<Product> GetAllProducts()
