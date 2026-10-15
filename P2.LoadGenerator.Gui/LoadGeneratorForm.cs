@@ -26,6 +26,7 @@ public sealed class LoadGeneratorForm : Form
     private readonly TextBox _targetUrlBox = new() { Text = "http://localhost:5000", Enabled = false };
     private readonly TextBox _endpointPathBox = new() { Text = "/api/customers/orders" };
     private readonly Button _runButton = new() { Text = "Run Load Test" };
+    private readonly Button _cancelButton = new() { Text = "Cancel", Enabled = false };
     private readonly Button _exportButton = new() { Text = "Export to P3 JSON...", Enabled = false };
     private readonly Label _statusLabel = new() { AutoSize = true, Text = "Idle." };
     private readonly DataGridView _resultsGrid = new()
@@ -37,6 +38,7 @@ public sealed class LoadGeneratorForm : Form
     };
 
     private LoadTestRunResult? _lastResult;
+    private CancellationTokenSource? _runCancellation;
 
     public LoadGeneratorForm()
     {
@@ -45,7 +47,7 @@ public sealed class LoadGeneratorForm : Form
         Height = 600;
         StartPosition = FormStartPosition.CenterScreen;
 
-        _profileCombo.Items.AddRange(new object[] { "SteadyRamp", "Spike", "Soak" });
+        _profileCombo.Items.AddRange(LoadProfileFactory.ProfileNames.ToArray<object>());
         _profileCombo.SelectedIndex = 0;
 
         _requestSourceCombo.Items.AddRange(new object[]
@@ -61,6 +63,7 @@ public sealed class LoadGeneratorForm : Form
             _targetUrlBox.Enabled = _targetCombo.SelectedIndex == 1;
 
         _runButton.Click += async (_, _) => await RunAsync();
+        _cancelButton.Click += (_, _) => _runCancellation?.Cancel();
         _exportButton.Click += (_, _) => Export();
 
         BuildLayout();
@@ -83,6 +86,7 @@ public sealed class LoadGeneratorForm : Form
 
         var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         buttonPanel.Controls.Add(_runButton);
+        buttonPanel.Controls.Add(_cancelButton);
         buttonPanel.Controls.Add(_exportButton);
         buttonPanel.Controls.Add(_statusLabel);
 
@@ -105,14 +109,29 @@ public sealed class LoadGeneratorForm : Form
 
     private async Task RunAsync()
     {
+        var useHttp = _targetCombo.SelectedIndex == 1;
+        Uri? targetUri = null;
+        if (useHttp && !TryParseHttpUri(_targetUrlBox.Text, out targetUri))
+        {
+            MessageBox.Show(this, "Target base URL must be an absolute http:// or https:// address.",
+                "Invalid target URL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         _runButton.Enabled = false;
+        _cancelButton.Enabled = true;
         _exportButton.Enabled = false;
         _statusLabel.Text = "Running...";
         _resultsGrid.DataSource = null;
+        _runCancellation = new CancellationTokenSource();
+        HttpClient? httpClient = null;
 
         try
         {
-            var profile = BuildProfile();
+            var profile = LoadProfileFactory.Create(
+                (string)_profileCombo.SelectedItem!,
+                TimeSpan.FromSeconds((double)_durationSeconds.Value),
+                (int)_maxConcurrency.Value);
             var config = new LoadTestConfiguration
             {
                 TargetBaseUrl = _targetUrlBox.Text,
@@ -124,16 +143,24 @@ public sealed class LoadGeneratorForm : Form
                 RunLabel = $"gui-run-{DateTime.Now:HHmmss}"
             };
 
-            ICustomerEndpointClient endpointClient = _targetCombo.SelectedIndex == 1
-                ? new HttpCustomerEndpointClient(new HttpClient { BaseAddress = new Uri(_targetUrlBox.Text) }, _endpointPathBox.Text)
-                : new SimulatedCustomerEndpointClient(baseLatencyMs: 40, latencyJitterMs: 15, errorRate: 0.02);
+            ICustomerEndpointClient endpointClient;
+            if (useHttp)
+            {
+                // One HttpClient per run, disposed in finally, so repeated runs don't leak sockets.
+                httpClient = new HttpClient { BaseAddress = targetUri };
+                endpointClient = new HttpCustomerEndpointClient(httpClient, _endpointPathBox.Text);
+            }
+            else
+            {
+                endpointClient = new SimulatedCustomerEndpointClient(baseLatencyMs: 40, latencyJitterMs: 15, errorRate: 0.02);
+            }
 
             ICustomerRequestFactory requestFactory = _requestSourceCombo.SelectedIndex == 1
                 ? new AdversarialCustomerRequestFactory()
                 : new CatalogCustomerRequestFactory(ProductCatalogLoader.Load());
 
             var generator = new Execution.LoadGenerator(config, endpointClient, requestFactory);
-            var result = await generator.RunAsync();
+            var result = await generator.RunAsync(_runCancellation.Token);
 
             _lastResult = result;
             _resultsGrid.DataSource = result.EndpointMetrics
@@ -154,6 +181,10 @@ public sealed class LoadGeneratorForm : Form
             _statusLabel.Text = $"Done: {result.Duration.TotalSeconds:F1}s, profile '{result.ProfileName}'.";
             _exportButton.Enabled = true;
         }
+        catch (OperationCanceledException)
+        {
+            _statusLabel.Text = "Run cancelled.";
+        }
         catch (Exception ex)
         {
             _statusLabel.Text = $"Run failed: {ex.Message}";
@@ -161,41 +192,37 @@ public sealed class LoadGeneratorForm : Form
         }
         finally
         {
+            httpClient?.Dispose();
+            _runCancellation.Dispose();
+            _runCancellation = null;
+            _cancelButton.Enabled = false;
             _runButton.Enabled = true;
         }
     }
 
-    private ILoadProfile BuildProfile()
-    {
-        var duration = TimeSpan.FromSeconds((double)_durationSeconds.Value);
-        var peak = (int)_maxConcurrency.Value;
+    private static bool TryParseHttpUri(string text, out Uri? uri) =>
+        Uri.TryCreate(text, UriKind.Absolute, out uri)
+        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
-        return _profileCombo.SelectedItem as string switch
-        {
-            "Spike" => new SpikeProfile(
-                duration: duration,
-                baselineConcurrency: Math.Max(1, peak / 10),
-                spikeConcurrency: peak,
-                spikeStart: TimeSpan.FromSeconds(duration.TotalSeconds * 0.4),
-                spikeDuration: TimeSpan.FromSeconds(duration.TotalSeconds * 0.2)),
-            "Soak" => new SoakProfile(duration, concurrency: Math.Max(1, peak / 4)),
-            _ => new SteadyRampProfile(duration, startConcurrency: 1, peakConcurrency: peak)
-        };
-    }
 
     private void Export()
     {
         if (_lastResult is null) return;
 
+        // Default to the shared SampleData/runs.json P3.Dashboard reads, so a GUI run shows up
+        // in the regression tracker without the user having to find that file themselves.
+        var sharedPath = SharedRunsFile.ResolvePath();
         using var dialog = new SaveFileDialog
         {
             Filter = "JSON files (*.json)|*.json",
-            FileName = "runs.json"
+            InitialDirectory = Path.GetDirectoryName(sharedPath),
+            FileName = Path.GetFileName(sharedPath),
+            OverwritePrompt = false // the exporter appends; it never replaces existing runs
         };
 
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var exporter = new JsonRunExporter(dialog.FileName);
+        var exporter = new JsonRunExporter(dialog.FileName, Environment.GetEnvironmentVariable("BUILD_ID"));
         _ = exporter.ExportAsync(_lastResult).ContinueWith(t =>
         {
             _statusLabel.Text = t.IsFaulted
