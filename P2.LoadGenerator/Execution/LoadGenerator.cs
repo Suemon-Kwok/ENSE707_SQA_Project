@@ -26,6 +26,14 @@ public sealed class LoadGenerator : ILoadGenerator
         TimeSpan? tickInterval = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
+
+        // SemaphoreSlim(0) never releases a slot, so MaxConcurrency = 0 used to hang the
+        // run forever instead of failing; reject it (and a non-positive timeout) up front.
+        if (config.MaxConcurrency < 1)
+            throw new ArgumentOutOfRangeException(nameof(config), "MaxConcurrency must be at least 1.");
+        if (config.RequestTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(config), "RequestTimeout must be positive.");
+
         _endpointClient = endpointClient ?? throw new ArgumentNullException(nameof(endpointClient));
         _requestFactory = requestFactory ?? throw new ArgumentNullException(nameof(requestFactory));
         _aggregator = aggregator ?? new RunMetricsAggregator();

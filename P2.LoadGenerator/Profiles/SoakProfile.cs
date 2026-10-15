@@ -13,6 +13,11 @@ public sealed class SoakProfile : ILoadProfile
 
     public SoakProfile(TimeSpan duration, int concurrency)
     {
+        if (duration <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(duration), "Duration must be positive.");
+        if (concurrency < 0)
+            throw new ArgumentOutOfRangeException(nameof(concurrency), "Concurrency cannot be negative.");
+
         Duration = duration;
         Concurrency = concurrency;
     }
