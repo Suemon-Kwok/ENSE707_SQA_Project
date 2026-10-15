@@ -40,6 +40,10 @@ public sealed class LoadGeneratorForm : Form
     private LoadTestRunResult? _lastResult;
     private CancellationTokenSource? _runCancellation;
 
+    // Set by RunSmokeTestAsync: no modal dialogs (nobody is there to close them in CI),
+    // and errors are rethrown so the smoke run fails instead of just updating the label.
+    private bool _headless;
+
     public LoadGeneratorForm()
     {
         Text = "P2 Load Generator";
@@ -64,7 +68,7 @@ public sealed class LoadGeneratorForm : Form
 
         _runButton.Click += async (_, _) => await RunAsync();
         _cancelButton.Click += (_, _) => _runCancellation?.Cancel();
-        _exportButton.Click += (_, _) => Export();
+        _exportButton.Click += async (_, _) => await ExportAsync();
 
         BuildLayout();
     }
@@ -113,6 +117,7 @@ public sealed class LoadGeneratorForm : Form
         Uri? targetUri = null;
         if (useHttp && !TryParseHttpUri(_targetUrlBox.Text, out targetUri))
         {
+            if (_headless) throw new InvalidOperationException("Invalid target URL.");
             MessageBox.Show(this, "Target base URL must be an absolute http:// or https:// address.",
                 "Invalid target URL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -188,6 +193,7 @@ public sealed class LoadGeneratorForm : Form
         catch (Exception ex)
         {
             _statusLabel.Text = $"Run failed: {ex.Message}";
+            if (_headless) throw;
             MessageBox.Show(this, ex.Message, "Load test failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -205,7 +211,7 @@ public sealed class LoadGeneratorForm : Form
         && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
 
-    private void Export()
+    private async Task ExportAsync()
     {
         if (_lastResult is null) return;
 
@@ -222,12 +228,48 @@ public sealed class LoadGeneratorForm : Form
 
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var exporter = new JsonRunExporter(dialog.FileName, Environment.GetEnvironmentVariable("BUILD_ID"));
-        _ = exporter.ExportAsync(_lastResult).ContinueWith(t =>
+        await ExportToAsync(dialog.FileName);
+    }
+
+    private async Task ExportToAsync(string path)
+    {
+        try
         {
-            _statusLabel.Text = t.IsFaulted
-                ? $"Export failed: {t.Exception?.GetBaseException().Message}"
-                : $"Exported to {t.Result}";
-        }, TaskScheduler.FromCurrentSynchronizationContext());
+            var exporter = new JsonRunExporter(path, Environment.GetEnvironmentVariable("BUILD_ID"));
+            var writtenPath = await exporter.ExportAsync(_lastResult!);
+            _statusLabel.Text = $"Exported to {writtenPath}";
+        }
+        catch (Exception ex)
+        {
+            _statusLabel.Text = $"Export failed: {ex.Message}";
+            if (_headless) throw;
+        }
+    }
+
+    /// <summary>
+    /// GUI smoke test (run with <c>--smoke &lt;exportPath&gt;</c>, used by CI): drives the real,
+    /// shown form through the same RunAsync/ExportToAsync code the buttons call — one short
+    /// simulated run per profile in the dropdown, each checked in the results grid and then
+    /// exported. Throws if any step fails.
+    /// </summary>
+    internal async Task RunSmokeTestAsync(string exportPath)
+    {
+        _headless = true;
+        _durationSeconds.Value = 2;
+        _maxConcurrency.Value = 5;
+        _targetCombo.SelectedIndex = 0; // simulated endpoint: no network needed
+
+        for (var i = 0; i < _profileCombo.Items.Count; i++)
+        {
+            _profileCombo.SelectedIndex = i;
+            _lastResult = null;
+
+            await RunAsync();
+
+            if (_lastResult is null || _resultsGrid.Rows.Count != 1 || !_exportButton.Enabled)
+                throw new InvalidOperationException($"Profile '{_profileCombo.SelectedItem}' did not show a result: {_statusLabel.Text}");
+
+            await ExportToAsync(exportPath);
+        }
     }
 }
