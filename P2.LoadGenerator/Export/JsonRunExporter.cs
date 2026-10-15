@@ -94,7 +94,17 @@ public sealed class JsonRunExporter : IResultExporter
             return new List<TestRunExportDto>();
         }
 
-        return JsonSerializer.Deserialize<List<TestRunExportDto>>(json, JsonOptions)
-               ?? new List<TestRunExportDto>();
+        try
+        {
+            return JsonSerializer.Deserialize<List<TestRunExportDto>>(json, JsonOptions)
+                   ?? new List<TestRunExportDto>();
+        }
+        catch (JsonException ex)
+        {
+            // Never overwrite a file we can't parse — that would silently wipe P3's run
+            // history. Fail loudly with the path so the user can fix or move the file.
+            throw new InvalidDataException(
+                $"Existing runs file '{_filePath}' is not valid run JSON; refusing to overwrite it.", ex);
+        }
     }
 }

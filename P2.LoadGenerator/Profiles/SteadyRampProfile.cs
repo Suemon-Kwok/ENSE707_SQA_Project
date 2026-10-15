@@ -13,6 +13,10 @@ public sealed class SteadyRampProfile : ILoadProfile
 
     public SteadyRampProfile(TimeSpan duration, int startConcurrency, int peakConcurrency)
     {
+        if (duration <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(duration), "Duration must be positive.");
+        if (startConcurrency < 0)
+            throw new ArgumentOutOfRangeException(nameof(startConcurrency), "Start concurrency cannot be negative.");
         if (peakConcurrency < startConcurrency)
             throw new ArgumentException("Peak concurrency must be >= start concurrency.", nameof(peakConcurrency));
 
@@ -27,6 +31,8 @@ public sealed class SteadyRampProfile : ILoadProfile
 
         var progress = elapsed.TotalMilliseconds / Duration.TotalMilliseconds;
         var value = StartConcurrency + (PeakConcurrency - StartConcurrency) * progress;
-        return (int)Math.Round(value);
+        // Floor, not Round: rounding let the ramp report peak concurrency up to half a
+        // step before the duration had elapsed (e.g. 99.99 -> 100 at 9.999s of a 10s ramp).
+        return (int)Math.Floor(value);
     }
 }
