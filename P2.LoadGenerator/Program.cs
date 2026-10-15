@@ -4,8 +4,6 @@ using P2.LoadGenerator.Endpoints;
 using P2.LoadGenerator.Execution;
 using P2.LoadGenerator.Export;
 using P2.LoadGenerator.Profiles;
-using System;
-using System.IO;
 
 // Demo run against the simulated endpoint, since P1's storefront isn't up yet.
 // Once it is: replace SimulatedCustomerEndpointClient with HttpCustomerEndpointClient
@@ -50,13 +48,9 @@ await printer.ExportAsync(result);
 
 // ...and the automated handoff to P3: writes/append this run to the same JSON shape
 // P3's JsonTestRunStore reads, retiring the old manual console-copy step.
-//
-// AppContext.BaseDirectory is P2's own build output folder (bin/Debug/net8.0/),
-// four levels below the repo root — walk back up to it so this lands in the
-// SAME shared SampleData/runs.json that P3.Dashboard's Program.cs points at,
-// instead of a copy sitting in P2's build folder that P3 never sees.
-var repoRoot = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..");
-var sharedDataPath = Path.Combine(repoRoot, "SampleData", "runs.json");
+// SharedRunsFile walks up from the build output folder to the repo's SampleData folder,
+// so this lands in the SAME runs.json that P3.Dashboard's Program.cs points at.
+var sharedDataPath = SharedRunsFile.ResolvePath();
 
 IResultExporter jsonExporter = new JsonRunExporter(
     filePath: sharedDataPath,
