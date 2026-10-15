@@ -589,4 +589,407 @@ public class Tests
             if (File.Exists(tempFile)) File.Delete(tempFile);
         }
     }
+
+    // --- Shared helpers for the tests below -----------------------------------------
+
+    private static LoadTestConfiguration ConfigFor(ILoadProfile profile, int maxConcurrency = 10, TimeSpan? timeout = null) => new()
+    {
+        TargetBaseUrl = "http://localhost:5000",
+        CustomerEndpointPath = "/api/customers/orders",
+        Profile = profile,
+        MaxConcurrency = maxConcurrency,
+        BatchSize = 2,
+        RequestTimeout = timeout ?? TimeSpan.FromSeconds(1),
+        RunLabel = "hardening-test"
+    };
+
+    private static LoadTestRunResult SampleRunResult() => new()
+    {
+        RunId = Guid.NewGuid(),
+        RunLabel = "sample",
+        ProfileName = "Soak",
+        StartedAtUtc = DateTimeOffset.UtcNow,
+        CompletedAtUtc = DateTimeOffset.UtcNow.AddSeconds(1),
+        EndpointMetrics = Array.Empty<EndpointLoadMetric>()
+    };
+
+    /// <summary>Endpoint that never answers on its own — only the per-request timeout ends it.</summary>
+    private sealed class NeverRespondingEndpointClient : ICustomerEndpointClient
+    {
+        public async Task<RequestResult> SendAsync(CustomerRequest request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
+
+    /// <summary>Fake HTTP transport so HttpCustomerEndpointClient can be tested without a server.</summary>
+    private sealed class StubHttpHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, HttpResponseMessage> _respond;
+        public Uri? LastRequestUri { get; private set; }
+
+        public StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) => _respond = respond;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastRequestUri = request.RequestUri;
+            return Task.FromResult(_respond(request));
+        }
+    }
+
+    private static HttpCustomerEndpointClient HttpClientWith(StubHttpHandler handler) =>
+        new(new HttpClient(handler) { BaseAddress = new Uri("http://localhost:5000") }, "/api/customers/orders");
+
+    private static CustomerRequest SampleRequest(string productId = "7") => new()
+    {
+        RequestId = Guid.NewGuid(),
+        CustomerId = "cust-1",
+        Parameters = new Dictionary<string, string> { ["productId"] = productId, ["qty"] = "1" }
+    };
+
+    // --- Load profile shape and input validation -------------------------------------
+
+    // Halfway through a 1 -> 101 ramp, concurrency should be exactly halfway (51).
+    [TestMethod]
+    public void SteadyRampProfile_Midpoint_IsLinear()
+    {
+        var profile = new SteadyRampProfile(TimeSpan.FromSeconds(10), startConcurrency: 1, peakConcurrency: 101);
+
+        Assert.AreEqual(51, profile.GetTargetConcurrency(TimeSpan.FromSeconds(5)));
+    }
+
+    // Spike window is [start, start + duration): on at its first instant, off again at its end.
+    [TestMethod]
+    public void SpikeProfile_WindowBoundaries_StartInclusiveEndExclusive()
+    {
+        var profile = new SpikeProfile(TimeSpan.FromSeconds(10), baselineConcurrency: 5, spikeConcurrency: 50,
+            spikeStart: TimeSpan.FromSeconds(4), spikeDuration: TimeSpan.FromSeconds(2));
+
+        Assert.AreEqual(5, profile.GetTargetConcurrency(TimeSpan.FromMilliseconds(3999)));
+        Assert.AreEqual(50, profile.GetTargetConcurrency(TimeSpan.FromSeconds(4)));
+        Assert.AreEqual(50, profile.GetTargetConcurrency(TimeSpan.FromMilliseconds(5999)));
+        Assert.AreEqual(5, profile.GetTargetConcurrency(TimeSpan.FromSeconds(6)));
+    }
+
+    // Soak must hold the same concurrency at every point in the run.
+    [TestMethod]
+    public void SoakProfile_ReturnsConstantConcurrencyThroughoutRun()
+    {
+        var profile = new SoakProfile(TimeSpan.FromMinutes(1), concurrency: 25);
+
+        Assert.AreEqual(25, profile.GetTargetConcurrency(TimeSpan.Zero));
+        Assert.AreEqual(25, profile.GetTargetConcurrency(TimeSpan.FromSeconds(59)));
+    }
+
+    // Invalid profile input (negative concurrency, zero duration, spike below baseline)
+    // must be rejected at construction rather than producing a nonsense run.
+    [TestMethod]
+    public void Profiles_InvalidInput_ThrowOnConstruction()
+    {
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new SoakProfile(TimeSpan.FromSeconds(1), concurrency: -1));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new SoakProfile(TimeSpan.Zero, concurrency: 5));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new SteadyRampProfile(TimeSpan.FromSeconds(1), startConcurrency: -1, peakConcurrency: 5));
+        Assert.ThrowsExactly<ArgumentException>(() => new SpikeProfile(TimeSpan.FromSeconds(10), baselineConcurrency: 10,
+            spikeConcurrency: 5, spikeStart: TimeSpan.FromSeconds(1), spikeDuration: TimeSpan.FromSeconds(1)));
+    }
+
+    // --- LoadProfileFactory (the mapping the GUI's profile dropdown uses) -------------
+
+    // Each GUI profile name must produce the matching profile type and peak concurrency.
+    [TestMethod]
+    public void LoadProfileFactory_KnownNames_BuildMatchingProfiles()
+    {
+        var duration = TimeSpan.FromSeconds(20);
+
+        var ramp = LoadProfileFactory.Create("SteadyRamp", duration, 100);
+        var spike = LoadProfileFactory.Create("Spike", duration, 100);
+        var soak = LoadProfileFactory.Create("Soak", duration, 100);
+
+        Assert.AreEqual("SteadyRamp", ramp.Name);
+        Assert.AreEqual(100, ramp.GetTargetConcurrency(duration));
+        Assert.AreEqual(100, spike.GetTargetConcurrency(TimeSpan.FromSeconds(10)), "Spike should be at peak mid-run.");
+        Assert.AreEqual(10, spike.GetTargetConcurrency(TimeSpan.FromSeconds(1)), "Spike baseline should be 10% of peak.");
+        Assert.AreEqual(25, soak.GetTargetConcurrency(TimeSpan.FromSeconds(10)), "Soak should hold 25% of peak.");
+    }
+
+    // Unknown profile names and a zero peak must fail fast, not fall back silently.
+    [TestMethod]
+    public void LoadProfileFactory_InvalidInput_Throws()
+    {
+        Assert.ThrowsExactly<ArgumentException>(() => LoadProfileFactory.Create("Bogus", TimeSpan.FromSeconds(5), 10));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => LoadProfileFactory.Create("Soak", TimeSpan.FromSeconds(5), 0));
+    }
+
+    // --- LoadGenerator configuration guards, timeout, and cancellation -----------------
+
+    // Regression test: MaxConcurrency = 0 used to create SemaphoreSlim(0), which hung the
+    // run forever. It must now be rejected immediately.
+    [TestMethod]
+    public void LoadGenerator_ZeroMaxConcurrency_ThrowsInsteadOfHanging()
+    {
+        var config = ConfigFor(new SoakProfile(TimeSpan.FromSeconds(1), 1), maxConcurrency: 0);
+
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() =>
+            new Execution.LoadGenerator(config, new SimulatedCustomerEndpointClient(), new RandomCustomerRequestFactory()));
+    }
+
+    // A zero per-request timeout is meaningless and must be rejected up front.
+    [TestMethod]
+    public void LoadGenerator_ZeroRequestTimeout_Throws()
+    {
+        var config = ConfigFor(new SoakProfile(TimeSpan.FromSeconds(1), 1), timeout: TimeSpan.Zero);
+
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() =>
+            new Execution.LoadGenerator(config, new SimulatedCustomerEndpointClient(), new RandomCustomerRequestFactory()));
+    }
+
+    // An endpoint that never answers must be recorded as timed-out failures, and the run
+    // must still finish — a hung server is exactly what a load test needs to report.
+    [TestMethod]
+    public async Task RunAsync_EndpointNeverResponds_RecordsTimeoutsAsFailures()
+    {
+        var config = ConfigFor(new SoakProfile(TimeSpan.FromMilliseconds(300), 2), timeout: TimeSpan.FromMilliseconds(50));
+        var generator = new Execution.LoadGenerator(config, new NeverRespondingEndpointClient(),
+            new RandomCustomerRequestFactory(seed: 1), tickInterval: TimeSpan.FromMilliseconds(10));
+
+        var result = await generator.RunAsync();
+
+        var metric = result.EndpointMetrics[0];
+        Assert.IsGreaterThan(0, metric.TotalRequests);
+        Assert.AreEqual(metric.TotalRequests, metric.FailureCount);
+        Assert.AreEqual(100.0, metric.ErrorRatePercent);
+    }
+
+    // Cancelling a run (the GUI's Cancel button) must stop it promptly with
+    // OperationCanceledException rather than running to the end of the profile.
+    [TestMethod]
+    public async Task RunAsync_CancelledMidRun_ThrowsOperationCanceledPromptly()
+    {
+        var config = ConfigFor(new SoakProfile(TimeSpan.FromMinutes(5), 2));
+        var generator = new Execution.LoadGenerator(config,
+            new SimulatedCustomerEndpointClient(baseLatencyMs: 5, latencyJitterMs: 0, errorRate: 0, seed: 1),
+            new RandomCustomerRequestFactory(seed: 1));
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => generator.RunAsync(cts.Token));
+
+        Assert.IsLessThan(TimeSpan.FromSeconds(5), stopwatch.Elapsed);
+    }
+
+    // --- HttpCustomerEndpointClient (live-endpoint path, via a stub transport) ---------
+
+    // 200 OK is a successful request with its status code recorded.
+    [TestMethod]
+    public async Task HttpClient_200Response_RecordsSuccess()
+    {
+        var client = HttpClientWith(new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)));
+
+        var result = await client.SendAsync(SampleRequest(), CancellationToken.None);
+
+        Assert.IsTrue(result.Success);
+        Assert.AreEqual(200, result.StatusCode);
+    }
+
+    // A 500 from the server is a failed request, not an exception.
+    [TestMethod]
+    public async Task HttpClient_500Response_RecordsFailureWithStatusCode()
+    {
+        var client = HttpClientWith(new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError)));
+
+        var result = await client.SendAsync(SampleRequest(), CancellationToken.None);
+
+        Assert.IsFalse(result.Success);
+        Assert.AreEqual(500, result.StatusCode);
+    }
+
+    // A dropped connection / unreachable host must become a failed result with the error
+    // message, so one bad request can't crash the whole run.
+    [TestMethod]
+    public async Task HttpClient_TransportFailure_RecordsFailureInsteadOfThrowing()
+    {
+        var client = HttpClientWith(new StubHttpHandler(_ => throw new HttpRequestException("connection refused")));
+
+        var result = await client.SendAsync(SampleRequest(), CancellationToken.None);
+
+        Assert.IsFalse(result.Success);
+        Assert.IsNull(result.StatusCode);
+        StringAssert.Contains(result.ErrorMessage!, "connection refused");
+    }
+
+    // Adversarial input must be URL-encoded on the wire, so an injection string arrives
+    // as a literal parameter value and can't break the query string itself.
+    [TestMethod]
+    public async Task HttpClient_AdversarialParameters_AreUrlEncoded()
+    {
+        var handler = new StubHttpHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.BadRequest));
+        var client = HttpClientWith(handler);
+
+        await client.SendAsync(SampleRequest(productId: "1&qty=999 OR 1=1"), CancellationToken.None);
+
+        var query = handler.LastRequestUri!.Query;
+        StringAssert.Contains(query, "productId=1%26qty%3D999%20OR%201%3D1");
+        Assert.AreEqual(1, query.Split("qty=").Length - 1, "Injected '&qty=' must not create a second qty parameter.");
+    }
+
+    // --- SharedRunsFile (where console + GUI exports land) -----------------------------
+
+    // From deep inside a build output folder, the resolver must find the repo's SampleData.
+    [TestMethod]
+    public void SharedRunsFile_FromNestedBuildFolder_FindsSampleDataRunsJson()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"p2-repo-{Guid.NewGuid():N}");
+        var nested = Path.Combine(root, "P2.LoadGenerator.Gui", "bin", "Debug", "net8.0-windows");
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "SampleData"));
+            Directory.CreateDirectory(nested);
+
+            var path = SharedRunsFile.ResolvePath(nested);
+
+            Assert.AreEqual(Path.Combine(root, "SampleData", "runs.json"), path);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    // Outside the repo (no SampleData anywhere above), fall back to runs.json next to the app.
+    [TestMethod]
+    public void SharedRunsFile_NoSampleDataFolder_FallsBackToStartDirectory()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"p2-norepo-{Guid.NewGuid():N}");
+
+        try
+        {
+            Directory.CreateDirectory(root);
+            var path = SharedRunsFile.ResolvePath(root);
+
+            // Only valid if the temp folder itself has no SampleData ancestor.
+            if (!path.StartsWith(root, StringComparison.Ordinal))
+                Assert.Inconclusive("A SampleData folder exists above the temp directory on this machine.");
+            Assert.AreEqual(Path.Combine(root, "runs.json"), path);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    // --- JsonRunExporter error handling + end-to-end handoff ----------------------------
+
+    // A corrupt runs file must be reported, and left untouched — overwriting it would
+    // silently wipe P3's entire run history.
+    [TestMethod]
+    public async Task ExportAsync_CorruptExistingFile_ThrowsAndLeavesFileUntouched()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"p2-corrupt-{Guid.NewGuid():N}.json");
+        const string corrupt = "{ this is not a run array";
+
+        try
+        {
+            await File.WriteAllTextAsync(tempFile, corrupt);
+            var exporter = new JsonRunExporter(tempFile, buildId: "build-corrupt");
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => exporter.ExportAsync(SampleRunResult()));
+
+            Assert.AreEqual(corrupt, await File.ReadAllTextAsync(tempFile));
+        }
+        finally
+        {
+            if (File.Exists(tempFile)) File.Delete(tempFile);
+        }
+    }
+
+    // Integration: a real (short) run through LoadGenerator, exported by JsonRunExporter,
+    // produces a P3-readable run with the measured request metrics in it.
+    [TestMethod]
+    public async Task RunThenExport_EndToEnd_WritesP3ReadableRunWithMetrics()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"p2-e2e-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var config = ConfigFor(new SoakProfile(TimeSpan.FromMilliseconds(400), 3));
+            var generator = new Execution.LoadGenerator(config,
+                new SimulatedCustomerEndpointClient(baseLatencyMs: 5, latencyJitterMs: 1, errorRate: 0, seed: 9),
+                new CatalogCustomerRequestFactory(seed: 9), tickInterval: TimeSpan.FromMilliseconds(20));
+
+            var result = await generator.RunAsync();
+            await new JsonRunExporter(tempFile, buildId: "e2e-build").ExportAsync(result);
+
+            using var stream = File.OpenRead(tempFile);
+            using var doc = await System.Text.Json.JsonDocument.ParseAsync(stream);
+            var run = doc.RootElement[0];
+            var metric = run.GetProperty("EndpointMetrics")[0];
+
+            Assert.AreEqual("e2e-build", run.GetProperty("BuildId").GetString());
+            Assert.AreEqual("Soak", run.GetProperty("LoadProfile").GetString());
+            Assert.AreEqual("/api/customers/orders", metric.GetProperty("EndpointName").GetString());
+            Assert.IsGreaterThan(0.0, metric.GetProperty("ThroughputRps").GetDouble());
+            Assert.AreEqual(0.0, metric.GetProperty("ErrorRatePercent").GetDouble());
+        }
+        finally
+        {
+            if (File.Exists(tempFile)) File.Delete(tempFile);
+        }
+    }
+
+    // --- RunMetricsAggregator percentiles ----------------------------------------------
+
+    // With latencies 1..100ms, nearest-rank percentiles are exact: P50=50, P95=95, P99=99.
+    [TestMethod]
+    public void Aggregate_OneToHundredMs_ReportsNearestRankPercentiles()
+    {
+        var results = Enumerable.Range(1, 100)
+            .Select(ms => new RequestResult { RequestId = Guid.NewGuid(), StartedAtUtc = DateTimeOffset.UtcNow, LatencyMs = ms, Success = true })
+            .Reverse() // unsorted input: the aggregator must sort before ranking
+            .ToList();
+
+        var metric = new RunMetricsAggregator().Aggregate("/api/test", results, TimeSpan.FromSeconds(10));
+
+        Assert.AreEqual(50, metric.P50LatencyMs);
+        Assert.AreEqual(95, metric.P95LatencyMs);
+        Assert.AreEqual(99, metric.P99LatencyMs);
+        Assert.AreEqual(100, metric.MaxLatencyMs);
+        Assert.AreEqual(50.5, metric.AverageLatencyMs);
+    }
+
+    // A run that produced no results must report all-zero metrics instead of throwing.
+    [TestMethod]
+    public void Aggregate_NoResults_ReturnsZeroedMetric()
+    {
+        var metric = new RunMetricsAggregator().Aggregate("/api/test", new List<RequestResult>(), TimeSpan.FromSeconds(1));
+
+        Assert.AreEqual(0, metric.TotalRequests);
+        Assert.AreEqual(0, metric.P99LatencyMs);
+        Assert.AreEqual(0, metric.ThroughputRps);
+    }
+
+    // --- ProductCatalogLoader fallbacks -------------------------------------------------
+
+    // Missing or malformed seed files must fall back to the built-in catalogue, never throw.
+    [TestMethod]
+    public void ProductCatalogLoader_MissingOrMalformedFile_FallsBackToBuiltInCatalog()
+    {
+        var malformed = Path.Combine(Path.GetTempPath(), $"p2-bad-seed-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            File.WriteAllText(malformed, "not json at all");
+
+            var fromMissing = ProductCatalogLoader.Load(Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}.json"));
+            var fromMalformed = ProductCatalogLoader.Load(malformed);
+
+            Assert.IsGreaterThan(0, fromMissing.Count);
+            Assert.HasCount(fromMissing.Count, fromMalformed);
+        }
+        finally
+        {
+            if (File.Exists(malformed)) File.Delete(malformed);
+        }
+    }
 }
