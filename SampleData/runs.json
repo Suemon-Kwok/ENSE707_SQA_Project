@@ -1,1 +1,46 @@
-[]
+[
+  {
+    "Id": "11111111-1111-1111-1111-111111111111",
+    "BuildId": "build-101",
+    "Timestamp": "2026-07-01T09:00:00Z",
+    "LoadProfile": "SteadyRamp",
+    "EndpointMetrics": [
+      { "EndpointName": "POST /checkout", "LatencyP50Ms": 120, "LatencyP95Ms": 210, "LatencyP99Ms": 300, "ErrorRatePercent": 0.2, "ThroughputRps": 85 },
+      { "EndpointName": "GET /cart", "LatencyP50Ms": 60, "LatencyP95Ms": 95, "LatencyP99Ms": 140, "ErrorRatePercent": 0.0, "ThroughputRps": 200 }
+    ],
+    "AnomalyDetected": false
+  },
+  {
+    "Id": "22222222-2222-2222-2222-222222222222",
+    "BuildId": "build-102",
+    "Timestamp": "2026-07-03T09:00:00Z",
+    "LoadProfile": "SteadyRamp",
+    "EndpointMetrics": [
+      { "EndpointName": "POST /checkout", "LatencyP50Ms": 118, "LatencyP95Ms": 205, "LatencyP99Ms": 290, "ErrorRatePercent": 0.1, "ThroughputRps": 88 },
+      { "EndpointName": "GET /cart", "LatencyP50Ms": 58, "LatencyP95Ms": 92, "LatencyP99Ms": 138, "ErrorRatePercent": 0.0, "ThroughputRps": 205 }
+    ],
+    "AnomalyDetected": false
+  },
+  {
+    "Id": "33333333-3333-3333-3333-333333333333",
+    "BuildId": "build-103",
+    "Timestamp": "2026-07-05T09:00:00Z",
+    "LoadProfile": "SteadyRamp",
+    "EndpointMetrics": [
+      { "EndpointName": "POST /checkout", "LatencyP50Ms": 121, "LatencyP95Ms": 215, "LatencyP99Ms": 305, "ErrorRatePercent": 0.2, "ThroughputRps": 84 },
+      { "EndpointName": "GET /cart", "LatencyP50Ms": 59, "LatencyP95Ms": 94, "LatencyP99Ms": 141, "ErrorRatePercent": 0.0, "ThroughputRps": 198 }
+    ],
+    "AnomalyDetected": false
+  },
+  {
+    "Id": "44444444-4444-4444-4444-444444444444",
+    "BuildId": "build-104",
+    "Timestamp": "2026-07-08T09:00:00Z",
+    "LoadProfile": "SteadyRamp",
+    "EndpointMetrics": [
+      { "EndpointName": "POST /checkout", "LatencyP50Ms": 300, "LatencyP95Ms": 410, "LatencyP99Ms": 520, "ErrorRatePercent": 1.8, "ThroughputRps": 55 },
+      { "EndpointName": "GET /cart", "LatencyP50Ms": 61, "LatencyP95Ms": 96, "LatencyP99Ms": 145, "ErrorRatePercent": 0.0, "ThroughputRps": 196 }
+    ],
+    "AnomalyDetected": true
+  }
+]

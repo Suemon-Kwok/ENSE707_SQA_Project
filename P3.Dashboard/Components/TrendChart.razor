@@ -2,7 +2,12 @@
    Draws a simple line chart as hand-built SVG. We do this instead of pulling
    in a charting NuGet package so the project stays fully offline/dependency-
    free, matching the "no external network dependency" non-functional
-   requirement. Good enough for a semester project's data volume. *@
+   requirement. Good enough for a semester project's data volume.
+
+   Update: added axis labels (min/max on the Y axis, one date label per point
+   on the X axis) plus a light midpoint gridline, since a bare line with no
+   scale was hard to read on its own — ties into Requirement 9's "at a
+   glance" usability goal. *@
 
 @if (Points == null || Points.Count == 0)
 {
@@ -30,9 +35,18 @@ else
     [Parameter] public List<(DateTime Timestamp, double Value)>? Points { get; set; }
 
     // Fixed drawing-surface size, in SVG user units (roughly pixels).
+    // Height grew slightly (200 -> 240) to make room for the X-axis date
+    // labels underneath the plot area.
     private const int Width = 600;
-    private const int Height = 200;
-    private const int Padding = 30; // margin so labels/lines aren't clipped at the edges
+    private const int Height = 240;
+
+    // Separate padding per side instead of one fixed value, since the Y-axis
+    // value labels need extra room on the left and the X-axis date labels
+    // need extra room at the bottom — a single symmetric Padding can't fit both.
+    private const int PaddingTop = 15;
+    private const int PaddingRight = 20;
+    private const int PaddingBottom = 35; // room for rotated date labels
+    private const int PaddingLeft = 55;   // room for Y-axis value labels
 
     // Builds the <svg> markup for the current Points as a plain string.
     // Doing this in code (rather than nested Razor @foreach + <line> tags)
@@ -51,22 +65,22 @@ else
             maxValue += 1;
         }
 
-        var plotWidth = Width - (Padding * 2);
-        var plotHeight = Height - (Padding * 2);
+        var plotWidth = Width - PaddingLeft - PaddingRight;
+        var plotHeight = Height - PaddingTop - PaddingBottom;
 
         // Converts a data point's index and value into actual SVG (x, y)
         // pixel coordinates within the padded drawing area.
         (double X, double Y) ToPixel(int index, double value)
         {
             // X spreads points evenly across the width based on their order.
-            var x = Padding + (points.Count <= 1
+            var x = PaddingLeft + (points.Count <= 1
                 ? plotWidth / 2.0
                 : index / (double)(points.Count - 1) * plotWidth);
 
             // Y is inverted because SVG's origin (0,0) is top-left, so a
             // HIGHER value must produce a SMALLER y to appear higher on screen.
             var normalized = (value - minValue) / (maxValue - minValue);
-            var y = Padding + (1 - normalized) * plotHeight;
+            var y = PaddingTop + (1 - normalized) * plotHeight;
 
             return (x, y);
         }
@@ -80,25 +94,67 @@ else
             return $"{x:F1},{y:F1}";
         }));
 
-        // Composes the final SVG: a border rectangle, the data polyline, and
-        // small circles marking each individual data point.
+        // Composes the final SVG: a border rectangle, an optional midpoint
+        // gridline, axis labels, the data polyline, and small circles marking
+        // each individual data point.
         var svg = new System.Text.StringBuilder();
-        svg.Append($"<svg viewBox=\"0 0 {Width} {Height}\" xmlns=\"http://www.w3.org/2000/svg\">");
+        svg.Append($"<svg viewBox=\"0 0 {Width} {Height}\" xmlns=\"http://www.w3.org/2000/svg\" " +
+                   "font-family=\"-apple-system, Segoe UI, Arial, sans-serif\">");
 
         // Background/border so the chart area is visible even with no data variation.
-        svg.Append($"<rect x=\"0\" y=\"0\" width=\"{Width}\" height=\"{Height}\" fill=\"none\" stroke=\"#ddd\" />");
+        svg.Append($"<rect x=\"{PaddingLeft}\" y=\"{PaddingTop}\" width=\"{plotWidth}\" " +
+                   $"height=\"{plotHeight}\" fill=\"none\" stroke=\"#ddd\" />");
+
+        // Light dashed gridline halfway up the plot, so a value can be judged
+        // against the midpoint without reading the exact Y-axis numbers.
+        var midY = PaddingTop + plotHeight / 2.0;
+        svg.Append($"<line x1=\"{PaddingLeft}\" y1=\"{midY:F1}\" x2=\"{PaddingLeft + plotWidth}\" " +
+                   $"y2=\"{midY:F1}\" stroke=\"#eee\" stroke-dasharray=\"4 3\" />");
+
+        // Y-axis labels: max value at the top of the plot, midpoint value in
+        // the middle, min value at the bottom. text-anchor="end" right-aligns
+        // each label against the plot's left edge.
+        var midValue = (minValue + maxValue) / 2.0;
+        svg.Append(YAxisLabel(maxValue, PaddingTop));
+        svg.Append(YAxisLabel(midValue, midY));
+        svg.Append(YAxisLabel(minValue, PaddingTop + plotHeight));
+
+        // X-axis labels: one short date per point, drawn below the plot area.
+        // Rotated -40 degrees so labels don't overlap when there are several
+        // points close together.
+        for (int i = 0; i < points.Count; i++)
+        {
+            var (x, _) = ToPixel(i, points[i].Value);
+            var labelY = Height - PaddingBottom + 14;
+            var dateLabel = points[i].Timestamp.ToString("dd/MM");
+            svg.Append($"<text x=\"{x:F1}\" y=\"{labelY}\" font-size=\"10\" fill=\"#555\" " +
+                       $"text-anchor=\"end\" transform=\"rotate(-40 {x:F1} {labelY})\">{dateLabel}</text>");
+        }
 
         // The line connecting every point in order.
-        svg.Append($"<polyline points=\"{coordinates}\" fill=\"none\" stroke=\"#2b6cb0\" stroke-width=\"2\" />");
+        svg.Append($"<polyline points=\"{coordinates}\" fill=\"none\" stroke=\"#5e8e3e\" stroke-width=\"2\" />");
 
         // One small circle per data point, so individual runs are visible/hoverable.
         for (int i = 0; i < points.Count; i++)
         {
             var (x, y) = ToPixel(i, points[i].Value);
-            svg.Append($"<circle cx=\"{x:F1}\" cy=\"{y:F1}\" r=\"3\" fill=\"#2b6cb0\" />");
+            svg.Append($"<circle cx=\"{x:F1}\" cy=\"{y:F1}\" r=\"3\" fill=\"#5e8e3e\" />");
         }
 
         svg.Append("</svg>");
         return svg.ToString();
+    }
+
+    // Builds one Y-axis <text> label, right-aligned to sit just left of the
+    // plot area at the given pixel height. Pulled into its own method since
+    // the same formatting is needed for the max, mid, and min labels.
+    private string YAxisLabel(double value, double y)
+    {
+        // dominant-baseline="middle" vertically centres the text on its y
+        // coordinate instead of sitting the text's baseline on it, so labels
+        // line up neatly with the gridline/edge they're marking.
+        return $"<text x=\"{PaddingLeft - 8}\" y=\"{y:F1}\" font-size=\"10\" fill=\"#555\" " +
+               "text-anchor=\"end\" dominant-baseline=\"middle\">" +
+               $"{value:F0}</text>";
     }
 }
