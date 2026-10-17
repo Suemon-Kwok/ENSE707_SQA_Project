@@ -1,0 +1,120 @@
+# P2 Load Generator quality gates.
+#
+# Scoped to P2 only: builds P2's own solution (engine + GUI + tests), so it doesn't
+# depend on or change how P3 / StoreSim are built. Runs on windows-latest because the
+# P2 GUI is WinForms (net8.0-windows).
+#
+#   Gate 1 - P2 solution builds with no errors
+#   Gate 2 - every P2 MSTest test passes
+#   Gate 3 - P2 engine line coverage >= 70% (the console entry point is covered
+#            by the smoke test instead of unit tests)
+#   Gate 4 - smoke test: the console app runs once and appends a P3-readable run
+#            to SampleData/runs.json (CI workspace only; nothing is committed back)
+#   Gate 5 - GUI smoke test: the WinForms app opens, runs every profile through the
+#            real form against the simulated endpoint, and exports each run
+
+name: P2 Load Generator
+
+on:
+  push:
+    branches: [ main, abDev ]
+    paths:
+      - "P2.LoadGenerator/**"
+      - "P2.LoadGenerator.Gui/**"
+      - "P2.LoadGenerator.Tests/**"
+      - ".github/workflows/p2-load-generator.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "P2.LoadGenerator/**"
+      - "P2.LoadGenerator.Gui/**"
+      - "P2.LoadGenerator.Tests/**"
+      - ".github/workflows/p2-load-generator.yml"
+  workflow_dispatch:
+
+jobs:
+  p2-build-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore P2.LoadGenerator/P2.LoadGenerator.slnx
+
+      - name: Build (gate 1)
+        run: dotnet build P2.LoadGenerator/P2.LoadGenerator.slnx --configuration Release --no-restore
+
+      - name: Unit + integration tests with coverage (gate 2)
+        run: >
+          dotnet test P2.LoadGenerator.Tests/P2.LoadGenerator.Tests.csproj
+          --configuration Release --no-build
+          --logger "trx;LogFileName=p2-tests.trx"
+          --collect "Code Coverage;Format=cobertura"
+          --results-directory TestResults
+
+      - name: Coverage threshold (gate 3)
+        shell: pwsh
+        run: |
+          $threshold = 0.70
+          $report = Get-ChildItem TestResults -Recurse -Filter *.cobertura.xml | Select-Object -First 1
+          if (-not $report) { Write-Error "No coverage report produced"; exit 1 }
+
+          [xml]$xml = Get-Content $report.FullName
+          $engine = $xml.coverage.packages.package | Where-Object { $_.name -eq "P2.LoadGenerator" }
+          $rate = [double]$engine.'line-rate'
+          Write-Host ("P2 engine line coverage: {0:P1} (threshold {1:P0})" -f $rate, $threshold)
+          if ($rate -lt $threshold) { Write-Error "Coverage below threshold"; exit 1 }
+
+      - name: Smoke test - console run exports to shared runs.json (gate 4)
+        shell: pwsh
+        env:
+          BUILD_ID: p2-ci-${{ github.run_number }}
+        run: |
+          $path = "SampleData/runs.json"
+          $before = if (Test-Path $path) { @(Get-Content $path -Raw | ConvertFrom-Json).Count } else { 0 }
+
+          dotnet run --project P2.LoadGenerator --configuration Release --no-build
+          if ($LASTEXITCODE -ne 0) { Write-Error "P2 load generator failed"; exit 1 }
+
+          $runs = @(Get-Content $path -Raw | ConvertFrom-Json)
+          if ($runs.Count -ne ($before + 1)) { Write-Error "Expected one new run, found $($runs.Count - $before)"; exit 1 }
+
+          $last = $runs[-1]
+          if ($last.BuildId -ne $env:BUILD_ID -or @($last.EndpointMetrics).Count -lt 1) {
+            Write-Error "Exported run has wrong BuildId or no EndpointMetrics"; exit 1
+          }
+          Write-Host "Smoke test passed: $($last.BuildId), $(@($last.EndpointMetrics).Count) endpoint(s)"
+
+      - name: GUI smoke test - form runs and exports every profile (gate 5)
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "gui-smoke-runs.json"
+          $exe = "P2.LoadGenerator.Gui/bin/Release/net8.0-windows/P2.LoadGenerator.Gui.exe"
+
+          $proc = Start-Process -FilePath $exe -ArgumentList "--smoke", "`"$out`"" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            if (Test-Path "$out.error.txt") { Get-Content "$out.error.txt" }
+            Write-Error "GUI smoke test failed (exit code $($proc.ExitCode))"; exit 1
+          }
+
+          $runs = @(Get-Content $out -Raw | ConvertFrom-Json)
+          $profiles = ($runs | ForEach-Object { $_.LoadProfile }) -join ", "
+          if ($runs.Count -ne 3) { Write-Error "Expected 3 exported GUI runs, found $($runs.Count)"; exit 1 }
+          Write-Host "GUI smoke test passed: exported $($runs.Count) runs ($profiles)"
+
+      - name: Upload test results and coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-test-results
+          path: TestResults
