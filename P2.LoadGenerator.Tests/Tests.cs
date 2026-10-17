@@ -1,4 +1,4 @@
-using P2.LoadGenerator.Catalog;
+﻿using P2.LoadGenerator.Catalog;
 using P2.LoadGenerator.Configuration;
 using P2.LoadGenerator.Endpoints;
 using P2.LoadGenerator.Execution;

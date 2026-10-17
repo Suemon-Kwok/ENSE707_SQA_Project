@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("P2.LoadGenerator.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fab65d6a1a5776dda3bb430496212705680fca4e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+47bda45ace26da9909ceec3a4e2ab4aa37ab6e42")]
 [assembly: System.Reflection.AssemblyProductAttribute("P2.LoadGenerator.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("P2.LoadGenerator.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
