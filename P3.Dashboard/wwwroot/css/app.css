@@ -109,3 +109,28 @@ h1, h2, h4 {
     border: 1px solid var(--shopify-border);
     border-radius: 4px;
 }
+
+/* Health status banner (Requirement 9): green = healthy, amber = warning,
+   red = critical. Each banner also states its state in words, so colour is
+   never the only signal. */
+.status-banner {
+    padding: 0.75rem 1rem;
+    margin-bottom: 1.5rem;
+    border-radius: 4px;
+    font-weight: 600;
+}
+
+.status-healthy {
+    background-color: var(--shopify-green);
+    color: var(--shopify-black);
+}
+
+.status-warning {
+    background-color: #ffc453;
+    color: var(--shopify-black);
+}
+
+.status-critical {
+    background-color: #d72c0d;
+    color: var(--shopify-white);
+}

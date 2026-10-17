@@ -3,6 +3,7 @@
    regression detector's verdict for that run against build history —
    i.e. "what does the latest build look like right now". *@
 @page "/"
+@using P3.Core.Health
 
 @* @inject asks the DI container (set up in Program.cs) for these services
    and makes them available as fields in this component. *@
@@ -12,12 +13,30 @@
 
 <h1>Live QA Dashboard</h1>
 
-@if (_latestRun == null)
+@if (_loadError != null)
+{
+    @* The run history file is damaged. Show a clear message instead of letting
+       the page crash (D-P3-05). role="alert" makes screen readers announce it. *@
+    <div class="status-banner status-critical" role="alert">
+        <strong>Data problem</strong> &mdash; @_loadError
+    </div>
+}
+else if (_latestRun == null)
 {
     <p><em>No test runs recorded yet. Waiting on data from P1/P2...</em></p>
 }
 else
 {
+    @* Status banner (Requirement 9): green = healthy, amber = warning,
+       red = critical. The wording repeats the state so colour is never the
+       only signal. *@
+    @if (_health != null)
+    {
+        <div class="@BannerCssClass" role="status">
+            <strong>@StatusLabel</strong> &mdash; @_health.Message
+        </div>
+    }
+
     <p>
         Latest build: <strong>@_latestRun.BuildId</strong>
         (@_latestRun.Timestamp.ToString("u"), profile: @_latestRun.LoadProfile)
@@ -101,6 +120,30 @@ else
     private List<RegressionResult> _regressionResults = new();
     private string? _lastExportPath;
 
+    // Banner state, and the message shown if the run history file is damaged.
+    private HealthStatusResult? _health;
+    private string? _loadError;
+
+    // The rule that turns regression results and error rates into green,
+    // amber or red lives in P3.Core, so it can be unit-tested without a browser.
+    private readonly HealthStatusEvaluator _healthEvaluator = new();
+
+    // CSS class for the banner, defined in wwwroot/css/app.css.
+    private string BannerCssClass => _health?.Status switch
+    {
+        HealthStatus.Critical => "status-banner status-critical",
+        HealthStatus.Warning => "status-banner status-warning",
+        _ => "status-banner status-healthy"
+    };
+
+    // Word shown in bold at the start of the banner.
+    private string StatusLabel => _health?.Status switch
+    {
+        HealthStatus.Critical => "Critical",
+        HealthStatus.Warning => "Warning",
+        _ => "Healthy"
+    };
+
     // OnInitializedAsync runs once when the component is first created —
     // the natural place to do the initial data load for the page.
     protected override Task OnInitializedAsync()
@@ -114,25 +157,52 @@ else
     // (if added later) can reuse it without duplicating logic.
     private void LoadData()
     {
-        var allRuns = RunStore.GetAllRuns(); // oldest-first, per ITestRunStore's contract
+        try
+        {
+            var allRuns = RunStore.GetAllRuns(); // oldest-first, per ITestRunStore's contract
 
-        // The latest run is simply the last element once sorted oldest-first.
-        _latestRun = allRuns.Count > 0 ? allRuns[^1] : null;
+            // The latest run is simply the last element once sorted oldest-first.
+            _latestRun = allRuns.Count > 0 ? allRuns[^1] : null;
 
-        // Compare the latest run against everything before it.
-        _regressionResults = _latestRun == null
-            ? new List<RegressionResult>()
-            : Detector.DetectRegressions(_latestRun, allRuns);
+            // Compare the latest run against everything before it.
+            _regressionResults = _latestRun == null
+                ? new List<RegressionResult>()
+                : Detector.DetectRegressions(_latestRun, allRuns);
+
+            // Decide the banner colour from those results.
+            _health = _latestRun == null
+                ? null
+                : _healthEvaluator.Evaluate(_latestRun, _regressionResults);
+
+            _loadError = null;
+        }
+        catch (InvalidDataException ex)
+        {
+            // A damaged runs.json must not crash the page. Show the message
+            // and clear everything else so no stale numbers are displayed.
+            _latestRun = null;
+            _regressionResults = new List<RegressionResult>();
+            _health = null;
+            _loadError = ex.Message;
+        }
     }
 
     // Wired to the "Export Report" button's @onclick above.
     private void ExportReport()
     {
-        var allRuns = RunStore.GetAllRuns();
+        try
+        {
+            var allRuns = RunStore.GetAllRuns();
 
-        // Recompute regression results across every run's latest-vs-history
-        // comparison isn't necessary for the report — we only need the
-        // CURRENT set of flags, which we already have in _regressionResults.
-        _lastExportPath = ReportExporter.Export(allRuns, _regressionResults, "qa-report.md");
+            // Recompute regression results across every run's latest-vs-history
+            // comparison isn't necessary for the report — we only need the
+            // CURRENT set of flags, which we already have in _regressionResults.
+            _lastExportPath = ReportExporter.Export(allRuns, _regressionResults, "qa-report.md");
+        }
+        catch (InvalidDataException ex)
+        {
+            // The file was damaged after the page loaded; show the same message.
+            _loadError = ex.Message;
+        }
     }
 }
