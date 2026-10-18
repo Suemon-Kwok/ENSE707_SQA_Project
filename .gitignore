@@ -22,3 +22,5 @@ Thumbs.db
 # run/rebuild
 run.txt
 rebuild.txtSampleData/runs.json 
+obj/
+bin/
