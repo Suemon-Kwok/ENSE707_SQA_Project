@@ -13,7 +13,7 @@ namespace StoreSim
         public static bool SimulateConnectionDrop { get; set; } = false;
         public static int SimulatedLatencyMs { get; set; } = 0;
 
-        private readonly string _connectionString = "Host=localhost;Port=5432;Database=StoreSimDB;Username=postgres;Password=GitGudAdminT3$t";
+        private readonly string _connectionString = "Host=localhost;Port=5432;Database=StoreSimDB;Username=postgres;Password=InsertPasswordHere";
 
         private NpgsqlConnection GetConnection()
         {
