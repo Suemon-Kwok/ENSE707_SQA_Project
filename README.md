@@ -137,4 +137,4 @@ GitHub Copilot was used for boilerplate, test scaffolding and documentation, in 
 
 ## Licence
 
-No licence has been specified. This is coursework; please contact the authors before reusing the code.
+MIT
