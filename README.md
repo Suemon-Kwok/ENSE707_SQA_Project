@@ -3,6 +3,8 @@
 **ENSE707 Software Quality Assurance, Auckland University of Technology (AUT)**
 Group project (3 members), 2026
 
+Disclaimer: This is an academic project created for the ENSE707 Software Quality Assurance course at Auckland University of Technology. It is not affiliated with, endorsed by, or connected to Shopify in any way. Shopify is referenced only as a real-world example that motivated the problem, and all systems, data, and results in this repository are simulated for educational purposes.
+
 A C# toolchain that load-tests a simulated e-commerce storefront, stores the results build after build, detects performance regressions between builds, and presents them on a live dashboard and an exportable QA report.
 
 ## The problem
